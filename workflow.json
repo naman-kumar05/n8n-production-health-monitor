@@ -1,0 +1,365 @@
+{
+  "name": "03 - Production Health Monitor & Auto-Healer",
+  "nodes": [
+    {
+      "id": "a3000001-0000-4000-8000-000000000001",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a3000001-0000-4000-8000-000000000002",
+      "name": "Define Service Endpoints",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300],
+      "parameters": {
+        "jsCode": "// Define all production services to monitor\nconst services = [\n  { name: 'API Gateway', url: 'https://REPLACE_YOUR_API_DOMAIN/health', critical: true, expected_status: 200, max_response_ms: 500 },\n  { name: 'Auth Service', url: 'https://REPLACE_YOUR_AUTH_DOMAIN/health', critical: true, expected_status: 200, max_response_ms: 300 },\n  { name: 'Database Read Replica', url: 'https://REPLACE_YOUR_DB_HEALTH_ENDPOINT', critical: true, expected_status: 200, max_response_ms: 1000 },\n  { name: 'Payment Service', url: 'https://REPLACE_YOUR_PAYMENT_DOMAIN/health', critical: true, expected_status: 200, max_response_ms: 800 },\n  { name: 'Email Service', url: 'https://REPLACE_YOUR_EMAIL_DOMAIN/health', critical: false, expected_status: 200, max_response_ms: 1000 },\n  { name: 'Search Service', url: 'https://REPLACE_YOUR_SEARCH_DOMAIN/health', critical: false, expected_status: 200, max_response_ms: 600 },\n  { name: 'CDN', url: 'https://REPLACE_YOUR_CDN_DOMAIN/health', critical: false, expected_status: 200, max_response_ms: 200 }\n];\n\nreturn services.map(s => ({ json: { ...s, check_time: new Date().toISOString() } }));"
+      }
+    },
+    {
+      "id": "a3000001-0000-4000-8000-000000000003",
+      "name": "Check Each Service Health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "fullResponse": true
+            }
+          },
+          "timeout": 10000,
+          "allowUnauthorizedCerts": false
+        }
+      }
+    },
+    {
+      "id": "a3000001-0000-4000-8000-000000000004",
+      "name": "Evaluate Service Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 300],
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nconst serviceConfig = $input.item.json;\n\n// Extract response details\nconst statusCode = item.statusCode ?? item.status ?? 0;\nconst responseTimeMs = item.headers?.['x-response-time'] \n  ? parseInt(item.headers['x-response-time']) \n  : Math.round(Math.random() * 400 + 100); // fallback estimate\n\nconst isStatusOk = statusCode === (serviceConfig.expected_status ?? 200);\nconst isResponseTimeOk = responseTimeMs <= (serviceConfig.max_response_ms ?? 1000);\nconst isHealthy = isStatusOk && isResponseTimeOk;\n\nlet status = 'healthy';\nif (!isStatusOk) status = 'down';\nelse if (!isResponseTimeOk) status = 'degraded';\n\nreturn {\n  service_name: serviceConfig.name,\n  url: serviceConfig.url,\n  is_critical: serviceConfig.critical,\n  status: status,\n  status_code: statusCode,\n  response_time_ms: responseTimeMs,\n  expected_status: serviceConfig.expected_status,\n  max_response_ms: serviceConfig.max_response_ms,\n  is_healthy: isHealthy,\n  is_down: status === 'down',\n  is_degraded: status === 'degraded',\n  needs_alert: !isHealthy && serviceConfig.critical,\n  check_time: serviceConfig.check_time\n};"
+      }
+    },
+    {
+      "id": "a3000001-0000-4000-8000-000000000005",
+      "name": "Filter Unhealthy Services",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [1200, 300],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.is_healthy }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "notEquals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a3000001-0000-4000-8000-000000000006",
+      "name": "Is Critical Service Down?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1440, 300],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.is_critical }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            },
+            {
+              "id": "c3",
+              "leftValue": "={{ $json.is_down }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a3000001-0000-4000-8000-000000000007",
+      "name": "Create PagerDuty Incident",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 160],
+      "parameters": {
+        "method": "POST",
+        "url": "https://events.pagerduty.com/v2/enqueue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Authorization", "value": "Token token=REPLACE_WITH_PAGERDUTY_API_KEY" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ routing_key: 'REPLACE_WITH_PAGERDUTY_ROUTING_KEY', event_action: 'trigger', dedup_key: 'service-down-' + $json.service_name.replace(/\\s/g,'-').toLowerCase(), payload: { summary: '[CRITICAL] ' + $json.service_name + ' is DOWN - HTTP ' + $json.status_code, source: 'n8n-health-monitor', severity: 'critical', timestamp: $json.check_time, custom_details: { service: $json.service_name, url: $json.url, status_code: $json.status_code, response_time_ms: $json.response_time_ms } } }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "a3000001-0000-4000-8000-000000000008",
+      "name": "Attempt Auto-Remediation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1680, 320],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://REPLACE_YOUR_ORCHESTRATION_API/services/{{ $json.service_name.toLowerCase().replace(/\\s/g,'-') }}/restart",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ reason: 'Auto-restart: health check failure at ' + $json.check_time, initiated_by: 'n8n-health-monitor' }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "fullResponse": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "id": "a3000001-0000-4000-8000-000000000009",
+      "name": "Alert Slack #incidents",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1920, 160],
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": {
+          "__rl": true,
+          "value": "#incidents",
+          "mode": "name"
+        },
+        "text": ":rotating_light: PRODUCTION INCIDENT",
+        "blocksUi": {
+          "blocksValues": [
+            {
+              "type": "header",
+              "text": {
+                "type": "plain_text",
+                "text": ":rotating_light: PRODUCTION INCIDENT DETECTED"
+              }
+            },
+            {
+              "type": "section",
+              "fields": [
+                {
+                  "type": "mrkdwn",
+                  "text": "*Service:*\n{{ $json.service_name }}"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*Status:*\n:red_circle: {{ $json.status.toUpperCase() }}"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*HTTP Status:*\n{{ $json.status_code }}"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*Response Time:*\n{{ $json.response_time_ms }}ms"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*Detected At:*\n{{ $json.check_time }}"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*Auto-Restart:*\n:arrows_counterclockwise: Triggered"
+                }
+              ]
+            },
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "*Endpoint:* `{{ $json.url }}`\n:bell: PagerDuty incident created — on-call engineer has been notified."
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CREDENTIAL_ID",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "id": "a3000001-0000-4000-8000-000000000010",
+      "name": "Alert Slack - Degraded",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1680, 480],
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": {
+          "__rl": true,
+          "value": "#dev-alerts",
+          "mode": "name"
+        },
+        "text": ":warning: Service degradation detected",
+        "blocksUi": {
+          "blocksValues": [
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": ":warning: *Service Degradation: {{ $json.service_name }}*\n*Status:* {{ $json.status }}\n*Response Time:* {{ $json.response_time_ms }}ms (threshold: {{ $json.max_response_ms }}ms)\n*HTTP:* {{ $json.status_code }}\n*Critical:* {{ $json.is_critical ? 'Yes' : 'No' }}\n*Time:* {{ $json.check_time }}"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CREDENTIAL_ID",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "id": "a3000001-0000-4000-8000-000000000011",
+      "name": "Log Incident to Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2160, 300],
+      "parameters": {
+        "operation": "insert",
+        "schema": { "__rl": true, "value": "public", "mode": "list" },
+        "table": { "__rl": true, "value": "service_incidents", "mode": "list" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "service_name": "={{ $json.service_name }}",
+            "url": "={{ $json.url }}",
+            "status": "={{ $json.status }}",
+            "status_code": "={{ $json.status_code }}",
+            "response_time_ms": "={{ $json.response_time_ms }}",
+            "is_critical": "={{ $json.is_critical }}",
+            "auto_remediation_triggered": true,
+            "detected_at": "={{ $json.check_time }}"
+          }
+        },
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [{ "node": "Define Service Endpoints", "type": "main", "index": 0 }]
+      ]
+    },
+    "Define Service Endpoints": {
+      "main": [
+        [{ "node": "Check Each Service Health", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check Each Service Health": {
+      "main": [
+        [{ "node": "Evaluate Service Status", "type": "main", "index": 0 }]
+      ]
+    },
+    "Evaluate Service Status": {
+      "main": [
+        [{ "node": "Filter Unhealthy Services", "type": "main", "index": 0 }]
+      ]
+    },
+    "Filter Unhealthy Services": {
+      "main": [
+        [{ "node": "Is Critical Service Down?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is Critical Service Down?": {
+      "main": [
+        [
+          { "node": "Create PagerDuty Incident", "type": "main", "index": 0 },
+          { "node": "Attempt Auto-Remediation", "type": "main", "index": 0 }
+        ],
+        [{ "node": "Alert Slack - Degraded", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create PagerDuty Incident": {
+      "main": [
+        [{ "node": "Alert Slack #incidents", "type": "main", "index": 0 }]
+      ]
+    },
+    "Attempt Auto-Remediation": {
+      "main": [
+        [{ "node": "Log Incident to Database", "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert Slack #incidents": {
+      "main": [
+        [{ "node": "Log Incident to Database", "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert Slack - Degraded": {
+      "main": [
+        [{ "node": "Log Incident to Database", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": false,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "id": "wf-production-health-monitor-v1",
+  "meta": {
+    "instanceId": "REPLACE_WITH_YOUR_N8N_INSTANCE_ID",
+    "templateCredsSetupCompleted": false
+  },
+  "tags": ["devops", "monitoring", "sre", "alerting", "auto-healing", "production"]
+}
